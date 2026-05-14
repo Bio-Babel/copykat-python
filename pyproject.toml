@@ -3,11 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "copykat_py"
+name = "copykat-python"
 version = "1.1.0"
 description = "Python port of the R copykat package"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "Artistic-2.0"
+license-files = ["LICENSE"]
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
@@ -24,7 +26,7 @@ dev = ["pytest", "pytest-cov", "ruff"]
 docs = ["mkdocs", "mkdocstrings[python]", "mkdocs-material", "mkdocs-jupyter"]
 
 [tool.hatch.build.targets.sdist]
-include = ["copykat/", "tutorials/", "tests/", "validation/"]
+include = ["copykat/", "tests/"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["copykat"]
