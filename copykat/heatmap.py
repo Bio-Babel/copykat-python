@@ -84,7 +84,7 @@ def heatmap3(
     row_cluster: bool = True,
     col_cluster: bool = False,
     dist_func: str = "euclidean",
-    link_method: str = "ward",
+    link_method: str = "ward.D2",
     col_side_colors: np.ndarray | None = None,
     row_side_colors: np.ndarray | None = None,
     cmap: Any = "RdBu_r",
@@ -111,7 +111,10 @@ def heatmap3(
         Distance metric (R/pheatmap convention: ``"euclidean"``, ``"correlation"``,
         ``"manhattan"``, ...).
     link_method
-        Linkage method (``"ward"``, ``"ward.D"``, ``"ward.D2"``, ``"complete"``, ...).
+        Linkage method (``"ward.D"``, ``"ward.D2"``, ``"complete"``, ...).
+        ``"ward"`` is accepted as an alias for ``"ward.D2"`` — matching SciPy
+        and the R copykat README/vignette — even though R ``hclust`` itself
+        treats bare ``"ward"`` as the legacy ``"ward.D"``.
     col_side_colors, row_side_colors
         Color string arrays. Accepts ``(n,)``, ``(n, k)`` or ``(k, n)``;
         rendered as one or more annotation tracks.
@@ -128,7 +131,9 @@ def heatmap3(
     key
         Whether to draw the color legend.
     figsize
-        ``(width, height)`` in inches.
+        ``(width, height)`` in inches.  Controls both the inline display size
+        (when ``show=True``) and the saved-file dimensions (when ``save_path``
+        is provided).
     save_path
         If provided, save the figure to this path (PDF / PNG inferred from suffix).
     show
@@ -145,9 +150,19 @@ def heatmap3(
     Returns
     -------
     dict
-        ``row_order``, ``col_order`` (0-based dendrogram leaf orderings),
-        ``row_dendrogram``, ``col_dendrogram`` (SciPy linkage matrices or ``None``).
+        Always contains ``row_order`` and ``col_order`` (0-based dendrogram leaf
+        orderings; ``np.arange(n)`` when clustering is disabled on that axis).
+        Adds ``row_dendrogram`` / ``col_dendrogram`` (SciPy linkage matrices)
+        only when clustering was performed on that axis.
     """
+    # ``"ward"`` is ambiguous: SciPy treats it as R's ``"ward.D2"`` (the modern
+    # Ward criterion, what the R copykat README/vignette uses), while R
+    # ``hclust`` and pheatmap-python treat it as the legacy ``"ward.D"``.
+    # Resolve the alias here so this function matches the SciPy/R-vignette
+    # convention regardless of which backend computes the linkage.
+    if link_method == "ward":
+        link_method = "ward.D2"
+
     data = np.asarray(x)
     n_rows, n_cols = data.shape
     row_names = [f"r{i}" for i in range(n_rows)]
@@ -206,16 +221,38 @@ def heatmap3(
         width=figsize[0],
         height=figsize[1],
         filename=save_path,
-        silent=not show,
+        silent=True,
         use_raster=use_raster,
         interpolate=interpolate,
     )
 
-    return {
+    if show:
+        # Render the heatmap to a fresh renderer at the requested ``figsize``
+        # and surface the PNG via IPython.  We can't just ``display(ph)`` here
+        # because pheatmap's ``_ipython_display_`` calls ``grid_newpage()`` with
+        # hard-coded defaults (7 in x 5 in, 150 dpi), which would discard
+        # ``figsize`` entirely.  R pheatmap's ``width``/``height`` only affect
+        # file output too — this is the Python ergonomics gap we close here.
+        try:
+            from IPython.display import Image, display as _ipy_display
+            from grid_py import grid_newpage, grid_draw as _grid_draw
+            from grid_py._state import get_state
+
+            grid_newpage(width=figsize[0], height=figsize[1], dpi=150)
+            _grid_draw(ph.gtable)
+            png_bytes = get_state().get_renderer().to_png_bytes()
+            _ipy_display(Image(data=png_bytes, format="png"))
+        except ImportError:
+            ph.draw()
+
+    result: dict[str, Any] = {
         "row_order": np.asarray(ph.tree_row.order) if ph.tree_row is not None
                      else np.arange(n_rows),
         "col_order": np.asarray(ph.tree_col.order) if ph.tree_col is not None
                      else np.arange(n_cols),
-        "row_dendrogram": ph.tree_row.linkage if ph.tree_row is not None else None,
-        "col_dendrogram": ph.tree_col.linkage if ph.tree_col is not None else None,
     }
+    if ph.tree_row is not None:
+        result["row_dendrogram"] = ph.tree_row.linkage
+    if ph.tree_col is not None:
+        result["col_dendrogram"] = ph.tree_col.linkage
+    return result
