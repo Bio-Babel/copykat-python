@@ -1,9 +1,11 @@
 """Tests for heatmap visualization (R source: heatmap.3.R)."""
 
+import os
+
 import numpy as np
 import pytest
 
-from copykat.heatmap import heatmap3
+from copykat.heatmap import _normalize_side, heatmap3
 
 
 class TestHeatmap3:
@@ -22,6 +24,35 @@ class TestHeatmap3:
     def test_save(self, tmp_path):
         data = np.random.RandomState(42).randn(20, 10)
         path = str(tmp_path / "test.png")
-        result = heatmap3(data, save_path=path, show=False)
-        import os
+        heatmap3(data, save_path=path, show=False)
         assert os.path.exists(path)
+
+    def test_use_raster_keeps_pdf_small(self, tmp_path):
+        rng = np.random.RandomState(0)
+        data = rng.randn(60, 800)
+        vec_path = str(tmp_path / "vec.pdf")
+        ras_path = str(tmp_path / "ras.pdf")
+        heatmap3(data, save_path=vec_path, show=False, use_raster=False)
+        heatmap3(data, save_path=ras_path, show=False, use_raster=True)
+        vec_size = os.path.getsize(vec_path)
+        ras_size = os.path.getsize(ras_path)
+        # At 48k cells the fixed overhead (dendrogram + annotations + legend)
+        # caps the ratio at ~4-5x; copykat-scale (~3M cells) gives ~50x.
+        assert ras_size * 3 < vec_size, (
+            f"raster PDF ({ras_size} B) should be far smaller than "
+            f"vector PDF ({vec_size} B)"
+        )
+
+    def test_dedup_duplicate_side_tracks(self):
+        """R copykat convention: side colours doubled via cbind/rbind. Dedup it."""
+        colours = np.array(["red", "blue", "red", "blue", "red"])
+        doubled_col = np.column_stack([colours, colours])  # (5, 2) duplicated
+        doubled_row = np.array([colours, colours])  # (2, 5) duplicated
+        assert _normalize_side(doubled_col, 5, "col").shape == (5, 1)
+        assert _normalize_side(doubled_row, 5, "row").shape == (5, 1)
+
+    def test_dedup_keeps_distinct_tracks(self):
+        a = np.array(["red", "blue", "red"])
+        b = np.array(["green", "green", "yellow"])
+        stacked = np.column_stack([a, b])  # (3, 2) distinct
+        assert _normalize_side(stacked, 3, "col").shape == (3, 2)

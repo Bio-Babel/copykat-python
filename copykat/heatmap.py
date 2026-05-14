@@ -1,27 +1,81 @@
-"""Enhanced heatmap visualization (R source: heatmap.3.R)."""
+"""Heatmap visualization (R source: heatmap.3.R), powered by pheatmap-python."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import Normalize, to_rgba
-from matplotlib.gridspec import GridSpec
-from scipy.cluster.hierarchy import dendrogram, linkage
-from scipy.spatial.distance import pdist
+import pandas as pd
+from pheatmap import colorRampPalette, pheatmap as _pheatmap
+from scales import brewer_pal
 
 __all__ = ["heatmap3"]
 
 
-def _colors_to_rgba(arr: np.ndarray) -> np.ndarray:
-    """Convert an array of string color names to an RGBA float array."""
-    if arr.dtype.kind in ("U", "S", "O"):  # string or object dtype
-        shape = arr.shape
-        flat = arr.ravel()
-        rgba = np.array([to_rgba(c) for c in flat])
-        return rgba.reshape(*shape, 4)
-    return arr
+_RDBU_REVERSED = list(reversed(brewer_pal("div", "RdBu")(3)))
+
+
+def _resolve_palette(cmap: Any, n: int) -> Sequence[str]:
+    """Resolve a colormap spec to ``n`` hex colors."""
+    if isinstance(cmap, (list, tuple)) and len(cmap) > 0:
+        return colorRampPalette(list(cmap))(n)
+    if isinstance(cmap, str):
+        s = cmap.replace("-", "_")
+        if s.lower() in {"rdbu_r", "rdbu_rev"}:
+            return colorRampPalette(_RDBU_REVERSED)(n)
+        if s.endswith("_r"):
+            base = s[:-2]
+            try:
+                return colorRampPalette(list(reversed(brewer_pal("div", base)(3))))(n)
+            except Exception:
+                return colorRampPalette(list(reversed(brewer_pal("seq", base)(3))))(n)
+        try:
+            return colorRampPalette(brewer_pal("div", s)(3))(n)
+        except Exception:
+            return colorRampPalette(brewer_pal("seq", s)(3))(n)
+    return colorRampPalette(_RDBU_REVERSED)(n)
+
+
+def _normalize_side(arr: np.ndarray, n: int, axis: str) -> np.ndarray:
+    """Coerce side-color array to shape (n, n_tracks), dropping duplicate tracks.
+
+    The R copykat workflow doubles up a 1-D colour vector into a 2-column matrix
+    (``cbind(CHR, CHR)``) so that base-R ``heatmap.3`` — which requires a matrix
+    for ``ColSideColors`` / ``RowSideColors`` — renders a visually thicker band.
+    pheatmap renders each track as a *labelled* annotation strip, so feeding it
+    the doubled matrix produces two stacked identical bars.  We dedupe here so
+    the visual matches base-R intent: one track per distinct colour series.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        if arr.shape[0] != n:
+            raise ValueError(
+                f"{axis}_side_colors length {arr.shape[0]} != number of {axis}s {n}"
+            )
+        return arr.reshape(-1, 1)
+    if arr.shape[0] == n:
+        out = arr
+    elif arr.shape[1] == n:
+        out = arr.T
+    else:
+        raise ValueError(
+            f"{axis}_side_colors shape {arr.shape} does not match {axis} count {n}"
+        )
+    keep = [0]
+    for j in range(1, out.shape[1]):
+        if not all(np.array_equal(out[:, j], out[:, k]) for k in keep):
+            keep.append(j)
+    return out[:, keep]
+
+
+def _build_annotation(
+    arr: np.ndarray, index: Sequence[str], prefix: str
+) -> tuple[pd.DataFrame, dict[str, dict[str, str]]]:
+    n_tracks = arr.shape[1]
+    columns = [f"{prefix}{i + 1}" for i in range(n_tracks)]
+    df = pd.DataFrame(arr.astype(str), columns=columns, index=list(index))
+    colors = {c: {v: v for v in pd.unique(df[c])} for c in columns}
+    return df, colors
 
 
 def heatmap3(
@@ -33,7 +87,7 @@ def heatmap3(
     link_method: str = "ward",
     col_side_colors: np.ndarray | None = None,
     row_side_colors: np.ndarray | None = None,
-    cmap: str | Any = "RdBu_r",
+    cmap: Any = "RdBu_r",
     vmin: float | None = None,
     vmax: float | None = None,
     breaks: np.ndarray | None = None,
@@ -42,184 +96,126 @@ def heatmap3(
     figsize: tuple[float, float] = (10, 10),
     save_path: str | None = None,
     show: bool = False,
+    use_raster: bool = True,
+    interpolate: bool = False,
 ) -> dict[str, Any]:
-    """Create an enhanced heatmap with optional dendrograms and side color bars.
+    """Enhanced heatmap with optional dendrograms and categorical side tracks.
 
     Parameters
     ----------
-    x : np.ndarray
+    x
         Data matrix (rows x columns).
-    row_cluster : bool
-        Whether to cluster rows.
-    col_cluster : bool
-        Whether to cluster columns.
-    dist_func : str
-        Distance metric for clustering (e.g., ``"euclidean"``).
-    link_method : str
-        Linkage method (e.g., ``"ward"``).
-    col_side_colors : np.ndarray | None
-        Color array for column annotations. Shape (n_cols,) or (n_rows_annot, n_cols).
-    row_side_colors : np.ndarray | None
-        Color array for row annotations. Shape (n_rows,) or (n_rows, n_cols_annot).
-    cmap : str or Colormap
-        Colormap for the heatmap.
-    vmin : float | None
-        Minimum value for color scaling.
-    vmax : float | None
-        Maximum value for color scaling.
-    breaks : np.ndarray | None
-        Custom color breakpoints. If provided, overrides vmin/vmax.
-    dendrogram_ : str
-        Which dendrograms to show: ``"row"``, ``"column"``, ``"both"``, ``"none"``.
-    key : bool
-        Whether to show a color key.
-    figsize : tuple[float, float]
-        Figure size in inches.
-    save_path : str | None
-        If provided, save figure to this path.
-    show : bool
-        Whether to display the figure.
+    row_cluster, col_cluster
+        Toggle hierarchical clustering on each axis.
+    dist_func
+        Distance metric (R/pheatmap convention: ``"euclidean"``, ``"correlation"``,
+        ``"manhattan"``, ...).
+    link_method
+        Linkage method (``"ward"``, ``"ward.D"``, ``"ward.D2"``, ``"complete"``, ...).
+    col_side_colors, row_side_colors
+        Color string arrays. Accepts ``(n,)``, ``(n, k)`` or ``(k, n)``;
+        rendered as one or more annotation tracks.
+    cmap
+        Colormap spec. Accepts ``"RdBu_r"`` / ``"RdBu"`` / any RColorBrewer name
+        (with optional ``_r`` suffix to reverse), or an explicit list of hex/named
+        colors.
+    vmin, vmax
+        Used to build a default linear ``breaks`` if ``breaks`` is omitted.
+    breaks
+        Custom break points (length ``n_colors + 1``).
+    dendrogram_
+        Which dendrogram(s) to render: ``"row"``, ``"column"``, ``"both"``, ``"none"``.
+    key
+        Whether to draw the color legend.
+    figsize
+        ``(width, height)`` in inches.
+    save_path
+        If provided, save the figure to this path (PDF / PNG inferred from suffix).
+    show
+        If ``True``, render to the interactive grid device.
+    use_raster
+        If ``True`` (default), the heatmap body is embedded as a single raster
+        image. This keeps PDF file size bounded for matrices with millions of
+        cells (typical for copykat outputs with thousands of genomic bins).
+        Dendrograms, annotations and legend remain vector.
+    interpolate
+        Bilinear interpolation when ``use_raster`` is ``True``; default
+        nearest-neighbour to preserve cell-colour edges.
 
     Returns
     -------
-    dict[str, Any]
-        Dictionary with keys ``"row_order"`` and ``"col_order"`` containing
-        the row and column ordering arrays, and ``"row_dendrogram"`` and
-        ``"col_dendrogram"`` containing linkage matrices if clustering was performed.
+    dict
+        ``row_order``, ``col_order`` (0-based dendrogram leaf orderings),
+        ``row_dendrogram``, ``col_dendrogram`` (SciPy linkage matrices or ``None``).
     """
-    data = x.copy()
+    data = np.asarray(x)
     n_rows, n_cols = data.shape
+    row_names = [f"r{i}" for i in range(n_rows)]
+    col_names = [f"c{j}" for j in range(n_cols)]
 
-    result: dict[str, Any] = {"row_order": np.arange(n_rows), "col_order": np.arange(n_cols)}
-
-    # Determine layout
-    show_row_dend = row_cluster and dendrogram_ in ("row", "both", "r")
-    show_col_dend = col_cluster and dendrogram_ in ("column", "both", "c")
-    has_col_side = col_side_colors is not None
-    has_row_side = row_side_colors is not None
-
-    # Cluster
-    row_link = None
-    col_link = None
-    if row_cluster:
-        row_dist = pdist(data, metric=dist_func)
-        row_link = linkage(row_dist, method=link_method)
-        row_dend = dendrogram(row_link, no_plot=True)
-        row_order = np.array(row_dend["leaves"])
-        data = data[row_order, :]
-        result["row_order"] = row_order
-        result["row_dendrogram"] = row_link
-
-    if col_cluster:
-        col_dist = pdist(data.T, metric=dist_func)
-        col_link = linkage(col_dist, method=link_method)
-        col_dend = dendrogram(col_link, no_plot=True)
-        col_order = np.array(col_dend["leaves"])
-        data = data[:, col_order]
-        result["col_order"] = col_order
-        result["col_dendrogram"] = col_link
-
-    # Set up figure grid
-    fig = plt.figure(figsize=figsize)
-    n_grid_rows = 1 + int(show_col_dend) + int(has_col_side) + int(key)
-    n_grid_cols = 1 + int(show_row_dend) + int(has_row_side)
-
-    heights = []
-    if show_col_dend:
-        heights.append(0.8)
-    if has_col_side:
-        heights.append(0.15)
-    heights.append(5)  # main heatmap
-    if key:
-        heights.append(0.3)
-
-    widths = []
-    if show_row_dend:
-        widths.append(1.0)
-    if has_row_side:
-        widths.append(0.15)
-    widths.append(5)  # main heatmap
-
-    gs = GridSpec(len(heights), len(widths), figure=fig,
-                  height_ratios=heights, width_ratios=widths,
-                  hspace=0.02, wspace=0.02)
-
-    row_idx = 0
-    col_base = 0
-
-    # Column dendrogram
-    if show_col_dend and col_link is not None:
-        ax_cdend = fig.add_subplot(gs[row_idx, len(widths) - 1])
-        dendrogram(col_link, ax=ax_cdend, no_labels=True, color_threshold=0)
-        ax_cdend.axis("off")
-        row_idx += 1
-
-    # Column side colors
-    if has_col_side:
-        ax_cside = fig.add_subplot(gs[row_idx, len(widths) - 1])
-        csc = col_side_colors
-        if csc.ndim == 1:
-            csc = csc.reshape(1, -1)
-        elif csc.shape[1] != n_cols and csc.shape[0] == n_cols:
-            # R convention: (n_cols, n_tracks) — transpose to (n_tracks, n_cols)
-            csc = csc.T
-        if col_cluster:
-            csc = csc[:, result["col_order"]]
-        csc = _colors_to_rgba(csc)
-        ax_cside.imshow(csc, aspect="auto", interpolation="none")
-        ax_cside.set_xticks([])
-        ax_cside.set_yticks([])
-        row_idx += 1
-
-    # Row dendrogram
-    heatmap_row = row_idx
-    if show_row_dend and row_link is not None:
-        ax_rdend = fig.add_subplot(gs[heatmap_row, 0])
-        dendrogram(row_link, ax=ax_rdend, orientation="left", no_labels=True,
-                   color_threshold=0)
-        ax_rdend.axis("off")
-        col_base = 1
-
-    # Row side colors
-    if has_row_side:
-        ax_rside = fig.add_subplot(gs[heatmap_row, col_base])
-        rsc = row_side_colors
-        if rsc.ndim == 1:
-            rsc = rsc.reshape(-1, 1)
-        elif rsc.shape[0] != n_rows and rsc.shape[1] == n_rows:
-            # R convention: (n_tracks, n_rows) — transpose to (n_rows, n_tracks)
-            rsc = rsc.T
-        if row_cluster:
-            rsc = rsc[result["row_order"], :]
-        rsc = _colors_to_rgba(rsc)
-        ax_rside.imshow(rsc, aspect="auto", interpolation="none")
-        ax_rside.set_xticks([])
-        ax_rside.set_yticks([])
-        col_base += 1
-
-    # Main heatmap
-    ax_heat = fig.add_subplot(gs[heatmap_row, col_base])
     if breaks is not None:
-        norm = Normalize(vmin=breaks[0], vmax=breaks[-1])
+        breaks_arr = np.asarray(breaks, dtype=float)
+        n_colors = len(breaks_arr) - 1
     else:
-        norm = Normalize(vmin=vmin, vmax=vmax)
-    im = ax_heat.imshow(data, aspect="auto", cmap=cmap, norm=norm,
-                        interpolation="none")
-    ax_heat.set_xticks([])
-    ax_heat.set_yticks([])
+        n_colors = 100
+        if vmin is not None and vmax is not None:
+            breaks_arr = np.linspace(vmin, vmax, n_colors + 1)
+        else:
+            extreme = float(np.nanmax(np.abs(data)))
+            breaks_arr = np.linspace(-extreme, extreme, n_colors + 1)
+    color = _resolve_palette(cmap, n_colors)
 
-    # Color key
-    if key:
-        ax_key = fig.add_subplot(gs[-1, col_base])
-        plt.colorbar(im, cax=ax_key, orientation="horizontal")
-        row_idx += 1
+    th_row = None if dendrogram_ in ("row", "both", "r") else 0
+    th_col = None if dendrogram_ in ("column", "both", "c") else 0
 
-    if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    ann_row: pd.DataFrame | None = None
+    ann_col: pd.DataFrame | None = None
+    ann_colors: dict[str, Any] = {}
+    if row_side_colors is not None:
+        rsc = _normalize_side(row_side_colors, n_rows, "row")
+        ann_row, c = _build_annotation(rsc, row_names, "row_track_")
+        ann_colors.update(c)
+    if col_side_colors is not None:
+        csc = _normalize_side(col_side_colors, n_cols, "col")
+        ann_col, c = _build_annotation(csc, col_names, "col_track_")
+        ann_colors.update(c)
 
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
+    mat = pd.DataFrame(data, index=row_names, columns=col_names)
 
-    return result
+    ph = _pheatmap(
+        mat,
+        color=color,
+        breaks=breaks_arr,
+        cluster_rows=row_cluster,
+        cluster_cols=col_cluster,
+        clustering_distance_rows=dist_func,
+        clustering_distance_cols=dist_func,
+        clustering_method=link_method,
+        treeheight_row=th_row,
+        treeheight_col=th_col,
+        legend=key,
+        annotation_row=ann_row,
+        annotation_col=ann_col,
+        annotation_colors=ann_colors or None,
+        annotation_names_row=False,
+        annotation_names_col=False,
+        annotation_legend=False,
+        show_rownames=False,
+        show_colnames=False,
+        border_color=None,
+        width=figsize[0],
+        height=figsize[1],
+        filename=save_path,
+        silent=not show,
+        use_raster=use_raster,
+        interpolate=interpolate,
+    )
+
+    return {
+        "row_order": np.asarray(ph.tree_row.order) if ph.tree_row is not None
+                     else np.arange(n_rows),
+        "col_order": np.asarray(ph.tree_col.order) if ph.tree_col is not None
+                     else np.arange(n_cols),
+        "row_dendrogram": ph.tree_row.linkage if ph.tree_row is not None else None,
+        "col_dendrogram": ph.tree_col.linkage if ph.tree_col is not None else None,
+    }
