@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "copykat_py"
-version = "1.1.0+b7a4763"
+version = "1.1.0"
 description = "Python port of the R copykat package"
 requires-python = ">=3.10"
 license = "Artistic-2.0"

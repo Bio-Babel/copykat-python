@@ -1,6 +1,7 @@
 """copykat — Python port of the R copykat package for single-cell CNA inference."""
 
-__version__ = "1.1.0+b7a4763"
+__version__ = "1.1.0"
+__r_commit__ = "b7a4763"
 
 from .annotate import annotate_genes
 from .baseline import BaselineResult, baseline_gmm, baseline_norm_cl, baseline_synthetic

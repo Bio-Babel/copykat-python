@@ -1,22 +1,10 @@
 # copykat_py
 
-Python port of the R **copykat** package (version 1.1.0+b7a4763).
+Python port of the R [**copykat**](https://github.com/navinlabcode/copykat) package for single-cell copy number aberration (CNA) inference from scRNA-seq data.
+
 
 ## Installation
 
 ```bash
 pip install -e ".[dev]"
-```
-
-## Quick Start
-
-```python
-import copykat
-```
-
-## Documentation
-
-```bash
-pip install -e ".[docs]"
-mkdocs serve
 ```
